@@ -6,7 +6,7 @@ import serial
 import time
 
 # Arduino communication settings
-ARDUINO_PORT = 'COM10'  # Change this to match your Arduino port
+ARDUINO_PORT = 'COM9'  # Change this to match your Arduino port
 BAUD_RATE = 9600
 
 class HandTracker:
@@ -78,22 +78,14 @@ class HandTracker:
         """Determine if hand is left or right based on thumb position relative to other fingers"""
         if len(self.landmark_list) < 21:
             return "Right"  # Default
-            
-        # Get thumb tip and wrist positions
-        thumb_tip = self.landmark_list[4]  # Thumb tip
-        wrist = self.landmark_list[0]      # Wrist
-        index_mcp = self.landmark_list[5]  # Index finger MCP
-        
-        # Calculate relative position
-        # If thumb is to the right of the line from wrist to index MCP, it's likely a right hand
-        # If thumb is to the left, it's likely a left hand
-        
+        thumb_tip = self.landmark_list[4]
+        wrist = self.landmark_list[0]
+        index_mcp = self.landmark_list[5]
         thumb_x = thumb_tip[1]
         wrist_x = wrist[1]
         index_x = index_mcp[1]
-        
-        # Simple heuristic: if thumb is on the right side relative to index finger, it's right hand
-        if thumb_x > index_x:
+        # Koreksi: jika thumb di kiri index, itu tangan kanan (mirror webcam)
+        if thumb_x < index_x:
             return "Right"
         else:
             return "Left"
@@ -101,29 +93,24 @@ class HandTracker:
     def fingers_up(self, hand_type="Right"):
         """Determine which fingers are up"""
         fingers = []
-        
         if len(self.landmark_list) != 0:
-            # Thumb - different logic for left and right hand
-            # For right hand: thumb up when tip is to the right of pip
-            # For left hand: thumb up when tip is to the left of pip
+            # Thumb - balik logika agar open/close benar
             if hand_type == "Right":
-                if self.landmark_list[self.tip_ids[0]][1] > self.landmark_list[self.tip_ids[0] - 1][1]:
-                    fingers.append(1)
-                else:
-                    fingers.append(0)
-            else:  # Left hand
                 if self.landmark_list[self.tip_ids[0]][1] < self.landmark_list[self.tip_ids[0] - 1][1]:
                     fingers.append(1)
                 else:
                     fingers.append(0)
-            
+            else:  # Left hand
+                if self.landmark_list[self.tip_ids[0]][1] > self.landmark_list[self.tip_ids[0] - 1][1]:
+                    fingers.append(1)
+                else:
+                    fingers.append(0)
             # Four fingers - compare y coordinates
             for id in range(1, 5):
                 if self.landmark_list[self.tip_ids[id]][2] < self.landmark_list[self.pip_ids[id]][2]:
                     fingers.append(1)
                 else:
                     fingers.append(0)
-        
         return fingers
     
     def calculate_finger_angles(self):
@@ -214,6 +201,7 @@ def main():
     
     show_finger_count = True
     show_distance = False
+    paused = False  # Tambahkan variabel pause
     
     # Inisialisasi Arduino dengan try-except
     try:
@@ -232,48 +220,99 @@ def main():
         # Flip image horizontally for mirror effect
         img = cv2.flip(img, 1)
         
-        # Find hands
-        img = detector.find_hands(img)
-        landmark_list, bbox = detector.find_position(img)
-        
-        if len(landmark_list) != 0:
-            # Detect hand type (left or right)
-            hand_type = detector.get_hand_type(landmark_list)
-            # Gunakan status buka/tutup jari (1=open, 0=close)
-            fingers_bin = detector.calculate_finger_open_close_binary()
-            arduino_data = f"<{fingers_bin[0]},{fingers_bin[1]},{fingers_bin[2]},{fingers_bin[3]},{fingers_bin[4]}>\n"
-            if arduino is not None:
-                arduino.write(arduino_data.encode())
-            # Display status buka/tutup pada layar
-            for i, val in enumerate(fingers_bin):
-                finger_name = ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'][i]
-                status = 'OPEN' if val == 1 else 'CLOSE'
-                cv2.putText(img, f"{finger_name}: {status}", (200, 50 + i * 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if val == 1 else (0, 0, 255), 2)
+        if not paused:
+            # Find hands
+            img = detector.find_hands(img)
+            # Pilih tangan paling depan (paling dekat kamera = bounding box terbesar)
+            max_area = 0
+            main_hand_no = 0
+            if detector.results.multi_hand_landmarks:
+                for idx, hand_landmarks in enumerate(detector.results.multi_hand_landmarks):
+                    _, bbox = detector.find_position(img, hand_no=idx, draw=False)
+                    if bbox:
+                        x_min, y_min, x_max, y_max = bbox
+                        area = (x_max - x_min) * (y_max - y_min)
+                        if area > max_area:
+                            max_area = area
+                            main_hand_no = idx
+            landmark_list, bbox = detector.find_position(img, hand_no=main_hand_no)
             
-            # Finger counting
-            if show_finger_count:
-                fingers = detector.fingers_up(hand_type)
-                total_fingers = fingers.count(1)
-                
-                # Display finger count
-                cv2.rectangle(img, (20, 225), (170, 425), (0, 255, 0), cv2.FILLED)
-                cv2.putText(img, str(total_fingers), (45, 375), 
-                           cv2.FONT_HERSHEY_PLAIN, 10, (255, 0, 0), 25)
-            
-            # Distance measurement between thumb tip and index finger tip
-            if show_distance:
-                length, img, line_info = detector.find_distance(4, 8, img)
-                cv2.putText(img, f"Distance: {int(length)}", (50, 50), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
-            
-            # Display landmark coordinates for index finger tip
-            if len(landmark_list) > 8:
-                cv2.putText(img, f"Index Tip: ({landmark_list[8][1]}, {landmark_list[8][2]})", 
-                           (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        
-        # Display instructions
-        cv2.putText(img, "Press 'q': Quit | 'c': Toggle Count | 'd': Toggle Distance", 
+            if len(landmark_list) != 0:
+                hand_type = detector.get_hand_type(landmark_list)
+                cv2.putText(img, f"Hand: {hand_type}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                fingers_bin = detector.calculate_finger_open_close_binary()
+                # Wrist servo: 180 jika right, 0 jika left
+                wrist_val = 180 if hand_type == "Right" else 0
+                arduino_data = f"<{fingers_bin[0]},{fingers_bin[1]},{fingers_bin[2]},{fingers_bin[3]},{fingers_bin[4]},{wrist_val}>\n"
+                if arduino is not None and not paused:
+                    arduino.write(arduino_data.encode())
+                for i, val in enumerate(fingers_bin):
+                    finger_name = ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'][i]
+                    status = 'OPEN' if val == 1 else 'CLOSE'
+                    # Geser posisi teks ke kiri atas agar tidak tabrakan dengan tangan
+                    cv2.putText(img, f"{finger_name}: {status}", (30, 120 + i * 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if val == 1 else (0, 0, 255), 2)
+                # Finger counting
+                if show_finger_count:
+                    fingers = detector.fingers_up(hand_type)
+                    total_fingers = fingers.count(1)
+                    # Display finger count
+                    cv2.rectangle(img, (20, 225), (170, 425), (0, 255, 0), cv2.FILLED)
+                    cv2.putText(img, str(total_fingers), (45, 375), 
+                               cv2.FONT_HERSHEY_PLAIN, 10, (255, 0, 0), 25)
+                # Distance measurement between thumb tip and index finger tip
+                if show_distance:
+                    length, img, line_info = detector.find_distance(4, 8, img)
+                    cv2.putText(img, f"Distance: {int(length)}", (50, 50), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+                # Display landmark coordinates for index finger tip
+                if len(landmark_list) > 8:
+                    cv2.putText(img, f"Index Tip: ({landmark_list[8][1]}, {landmark_list[8][2]})", 
+                               (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        else:
+            # Find hands dan tampilan tetap berjalan, hanya pengiriman serial yang dihentikan
+            img = detector.find_hands(img)
+            # Pilih tangan paling depan (paling dekat kamera = bounding box terbesar)
+            max_area = 0
+            main_hand_no = 0
+            if detector.results.multi_hand_landmarks:
+                for idx, hand_landmarks in enumerate(detector.results.multi_hand_landmarks):
+                    _, bbox = detector.find_position(img, hand_no=idx, draw=False)
+                    if bbox:
+                        x_min, y_min, x_max, y_max = bbox
+                        area = (x_max - x_min) * (y_max - y_min)
+                        if area > max_area:
+                            max_area = area
+                            main_hand_no = idx
+            landmark_list, bbox = detector.find_position(img, hand_no=main_hand_no)
+            if len(landmark_list) != 0:
+                hand_type = detector.get_hand_type(landmark_list)
+                cv2.putText(img, f"Hand: {hand_type}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                fingers_bin = detector.calculate_finger_open_close_binary()
+                for i, val in enumerate(fingers_bin):
+                    finger_name = ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'][i]
+                    status = 'OPEN' if val == 1 else 'CLOSE'
+                    # Geser posisi teks ke kiri atas agar tidak tabrakan dengan tangan
+                    cv2.putText(img, f"{finger_name}: {status}", (30, 120 + i * 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if val == 1 else (0, 0, 255), 2)
+                if show_finger_count:
+                    fingers = detector.fingers_up(hand_type)
+                    total_fingers = fingers.count(1)
+                    cv2.rectangle(img, (20, 225), (170, 425), (0, 255, 0), cv2.FILLED)
+                    cv2.putText(img, str(total_fingers), (45, 375), 
+                               cv2.FONT_HERSHEY_PLAIN, 10, (255, 0, 0), 25)
+                if show_distance:
+                    length, img, line_info = detector.find_distance(4, 8, img)
+                    cv2.putText(img, f"Distance: {int(length)}", (50, 50), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+                if len(landmark_list) > 8:
+                    cv2.putText(img, f"Index Tip: ({landmark_list[8][1]}, {landmark_list[8][2]})", 
+                               (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            # Tambahkan tulisan PAUSED kecil di kanan atas
+            cv2.putText(img, "PAUSED", (img.shape[1] - 120, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+                               
+        # Display instructions                                 
+        cv2.putText(img, "Press 'q': Quit | 'c': Toggle Count | 'd': Toggle Distance | 'p': Pause", 
                    (10, img.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
         # Show image
@@ -287,6 +326,8 @@ def main():
             show_finger_count = not show_finger_count
         elif key == ord('d'):
             show_distance = not show_distance
+        elif key == ord('p'):
+            paused = not paused
     
     # Cleanup
     cap.release()
