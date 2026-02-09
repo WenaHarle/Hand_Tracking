@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 
 # ====== Serial config ======
-SERIAL_PORT = "COM5"      # Windows: "COM3" ; Linux/Mac: "/dev/ttyACM0" / "/dev/ttyUSB0"
+SERIAL_PORT = "COM4"      # Windows: "COM3" ; Linux/Mac: "/dev/ttyACM0" / "/dev/ttyUSB0"
 SERIAL_BAUD = 115200
 SERIAL_SEND_EVERY_MS = 33  # ~30 Hz
 
@@ -39,6 +39,7 @@ except ImportError:
 CAM_INDEX = 0
 FRAME_W   = 1280
 FRAME_H   = 720
+FLIP_HORIZONTAL = True  # Set False agar kamera tidak mirror
 
 SMOOTH_ALPHA = 0.30
 SWAP_HANDEDNESS_FOR_VIEWER = True
@@ -172,7 +173,7 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
 
-    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, model_complexity=1,
+    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2, model_complexity=1,
                            min_detection_confidence=0.6, min_tracking_confidence=0.6)
 
     smoother = EmaSmoother(alpha=SMOOTH_ALPHA)
@@ -187,6 +188,11 @@ def main():
     while True:
         ok, frame=cap.read()
         if not ok: break
+        
+        # Flip horizontal jika diperlukan
+        if FLIP_HORIZONTAL:
+            frame = cv2.flip(frame, 1)
+        
         h,w=frame.shape[:2]
 
         key=cv2.waitKey(1)&0xFF
@@ -209,10 +215,33 @@ def main():
             dynamic_pinch_thresh = max(20, int(min(w,h)*0.035))
 
         if results.multi_hand_landmarks:
-            lms = results.multi_hand_landmarks[0]
-            handed = results.multi_handedness[0]
+            # Pilih tangan paling depan (z terkecil = paling dekat ke kamera)
+            closest_idx = 0
+            if len(results.multi_hand_landmarks) > 1:
+                min_z = float('inf')
+                for idx, lms_temp in enumerate(results.multi_hand_landmarks):
+                    # Hitung rata-rata z dari semua landmark
+                    avg_z = sum(lm.z for lm in lms_temp.landmark) / len(lms_temp.landmark)
+                    if avg_z < min_z:
+                        min_z = avg_z
+                        closest_idx = idx
+            
+            lms = results.multi_hand_landmarks[closest_idx]
+            handed = results.multi_handedness[closest_idx]
             raw_label = handed.classification[0].label
             label = _swap_lr(raw_label) if SWAP_HANDEDNESS_FOR_VIEWER else raw_label
+
+            # Buat bounding box di sekitar tangan
+            x_coords = [lm_to_pixels(lm, w, h)[0] for lm in lms.landmark]
+            y_coords = [lm_to_pixels(lm, w, h)[1] for lm in lms.landmark]
+            x_min, x_max = max(0, min(x_coords) - 20), min(w, max(x_coords) + 20)
+            y_min, y_max = max(0, min(y_coords) - 20), min(h, max(y_coords) + 20)
+            
+            # Gambar bounding box (hijau tebal)
+            cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 3)
+            # Label tangan
+            cv2.putText(frame, f"{label} (Front)", (x_min, y_min - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
 
             # draw landmarks
             mp_drawing.draw_landmarks(frame, lms, mp_hands.HAND_CONNECTIONS,
@@ -265,6 +294,7 @@ def main():
 
         # FPS + help
         now=time.time(); fps=1.0/ (now-prev_time) if now>prev_time else 0.0; prev_time=now
+        cv2.putText(frame, "ARAHKAN TANGAN KE KAMERA", (w//2-250, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3, cv2.LINE_AA)
         cv2.putText(frame, f"FPS: {fps:.1f}", (w-140,30), cv2.FONT_HERSHEY_SIMPLEX,0.7,(50,220,50),2)
         cv2.putText(frame, help_text, (10, h-12), cv2.FONT_HERSHEY_SIMPLEX,0.55,(200,200,200),1)
         cv2.imshow("Finger -> 5 Servos", frame)
